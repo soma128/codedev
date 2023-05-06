@@ -441,21 +441,43 @@ __getitem__: 주어진 인덱스에 해당하는 데이터 샘플을 반환합�
 
     
 class TagDataset(Dataset):
-    def __init__(self, file_path, window_size=128, input_columns=None, output_column=None):
+    def __init__(self, df, input_columns, output_column, window_size, mean_df=None, std_df=None):
+        self.df = df
+        self.input_columns = input_columns
+        self.output_column = output_column
         self.window_size = window_size
-        self.df = pd.read_csv(file_path)
-        if input_columns is not None and output_column is not None:
-            self.df = self.df[[*input_columns, output_column]]
-        self.input_size = self.df.shape[1] - 1
-​
+        self.mean_df = mean_df
+        self.std_df = std_df
+
+        # 정규화
+        if mean_df is not None and std_df is not None:
+            sensor_columns = [item for item in df.columns if 'sensor_' in item]
+            df[sensor_columns] = (df[sensor_columns] - mean_df) / std_df
+
+        # 연속한 index를 기준으로 학습에 사용합니다.
+        dates = list(df['date'])
+        self.input_ids = make_data_idx(dates, window_size=window_size)
+
+        self.selected_columns = input_columns
+        self.var_data = torch.tensor(df[self.selected_columns].values, dtype=torch.float)
+
+        # Summary 용
+        self.df = df.iloc[np.array(self.input_ids)[:, -1]]
+
+    # Dataset은 반드시 __len__ 함수를 만들어줘야함(데이터 길이)
     def __len__(self):
-        return len(self.df) - self.window_size + 1
-​
-    def __getitem__(self, idx):
-        row = self.df.iloc[idx]
-        data = torch.tensor(row[:-1].values.astype(np.float32)).view(-1, self.input_size)
-        label = torch.tensor(row[-1].astype(np.float32))
-        return data, label
+        return len(self.input_ids)
+
+    # Dataset은 반드시 __getitem__ 함수를 만들어줘야함
+    # torch 모듈은 __getitem__ 을 호출하여 학습할 데이터를 불러옴.
+    def __getitem__(self, item):
+        temp_input_ids = self.input_ids[item]
+        input_values = self.var_data[temp_input_ids]
+
+        row = self.df.iloc[item]
+        output_value = torch.tensor(row[self.output_column].astype(np.float32))
+
+        return input_values, output_value
 
 ########################################
 #13LSTM 파라미터 
@@ -746,17 +768,16 @@ def get_loss_list(args, model, dataloader):
 ########################################
 #16 모델 생성을 위한 데이터셋 구분
 ########################################
-input_columns = ['tag1', 'tag2', 'tag3']
+input_columns = ['sensor_1', 'sensor_2', 'sensor_3', 'sensor_4']
 output_column = 'status'
 
-normal_dataset1 = TagDataset(normal_df1, input_columns=input_columns, output_column=output_column, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
-normal_dataset2 = TagDataset(normal_df2, input_columns=input_columns, output_column=output_column, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
-normal_dataset3 = TagDataset(normal_df3, input_columns=input_columns, output_column=output_column, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
+normal_dataset1 = TagDataset(df=normal_df1, input_columns=input_columns, output_column=output_column, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
+normal_dataset2 = TagDataset(df=normal_df2, input_columns=input_columns, output_column=output_column, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
+normal_dataset3 = TagDataset(df=normal_df3, input_columns=input_columns, output_column=output_column, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
 normal_dataset4 = TagDataset(normal_df4, input_columns=input_columns, output_column=output_column, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
 anormal_dataset1 = TagDataset(anormal_df1, input_columns=input_columns, output_column=output_column, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
 anormal_dataset2 = TagDataset(anormal_df2, input_columns=input_columns, output_column=output_column, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
 anormal_dataset3 = TagDataset(anormal_df2, input_columns=input_columns, output_column=output_column, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
-
 
 ## 학습하기 위해 Dataframe을 DataLoader형태로 변환한다.
 train_loader = torch.utils.data.DataLoader(
@@ -794,35 +815,6 @@ model = LSTMAutoEncoder(input_dim=args.input_size,
 model.to(args.device)
 model = run(args, model, train_loader, valid_loader)
 #model = run(args, model, train_loader, anormal_loader3)
-
-
-
-import matplotlib.pyplot as plt
-
-def visualize_reconstruction(original_data, reconstructed_data, index):
-    plt.figure(figsize=(12, 4))
-    plt.plot(original_data[index], label='Original data')
-    plt.plot(reconstructed_data[index], label='Reconstructed data')
-    plt.legend()
-    plt.show()
-
-# 사용 예시:
-loss_list, original_data, reconstructed_data = get_loss_list(args, model, normal_loader3)
-visualize_reconstruction(original_data, reconstructed_data, 0)
-
-
-
-
-# Check the shape of original data and reconstructed data
-data_iter = iter(normal_loader3)
-data = data_iter.next()
-print("Original data shape:", data.shape)
-
-recon_batch = model(data.to(args.device))
-print("Reconstructed data shape:", recon_batch.shape)
-
-
-
 
 ########################################
 #17. 학습모델을 검증데이터셋으로 anormal score 구함
