@@ -1,0 +1,949 @@
+import os
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+from torch import nn
+import easydict
+
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from easydict import EasyDict
+
+from tqdm.notebook import trange, tqdm
+from torch.utils.data import DataLoader, Dataset
+from celluloid import Camera
+import pandas as pd
+import pickle
+from typing import List
+import ipywidgets
+import random
+import seaborn as sns
+from sklearn.preprocessing import MinMaxScaler
+from scipy import interpolate
+from datetime import datetime, timedelta
+
+from torch.optim import lr_scheduler
+import torch.optim as optim
+
+########################################
+#1. RAW 데이터 로드
+########################################
+# group 1의 데이터를 사용할 경우, 아래 코드를 실행합니다.
+sensor1 = pd.read_csv('raw_data/g1_sensor1.csv', names = ['time', 'normal', 'type1', 'type2', 'type3'])
+sensor2 = pd.read_csv('raw_data/g1_sensor2.csv', names = ['time', 'normal', 'type1', 'type2', 'type3'])
+sensor3 = pd.read_csv('raw_data/g1_sensor3.csv', names = ['time', 'normal', 'type1', 'type2', 'type3'])
+sensor4 = pd.read_csv('raw_data/g1_sensor4.csv', names = ['time', 'normal', 'type1', 'type2', 'type3'])
+print("sensor1 head : ",sensor1.head)
+print('sensor 1의 데이터 크기', sensor1.shape)
+print('sensor 2의 데이터 크기', sensor2.shape)
+print('sensor 3의 데이터 크기', sensor3.shape)
+print('sensor 4의 데이터 크기', sensor4.shape)
+
+
+########################################
+#2. RAW 데이터 전처리
+########################################
+x_new = np.arange(0, 140, 0.001)
+y_new1 = []; y_new2 = []; y_new3 = []; y_new4 = []
+#실제 데이터에 시간에 대한 값들을 새루운 형태의 시간 배열에 의한 데이터로 변형(보간기법)시킨다.
+for item in ['normal', 'type1', 'type2', 'type3']:
+    f_linear1 = interpolate.interp1d(sensor1['time'], sensor1[item], kind='linear'); y_new1.append(f_linear1(x_new))
+    f_linear2 = interpolate.interp1d(sensor2['time'], sensor2[item], kind='linear'); y_new2.append(f_linear2(x_new))
+    f_linear3 = interpolate.interp1d(sensor3['time'], sensor3[item], kind='linear'); y_new3.append(f_linear3(x_new))
+    f_linear4 = interpolate.interp1d(sensor4['time'], sensor4[item], kind='linear'); y_new4.append(f_linear4(x_new))
+    
+#새롭게 변형된 값을 가진 가로 배열 list 4개항목을 dataframe 역치환하여 새로 배열로 변경함.
+sensor1 = pd.DataFrame(np.array(y_new1).T, columns = ['normal', 'type1', 'type2', 'type3'])
+sensor2 = pd.DataFrame(np.array(y_new2).T, columns = ['normal', 'type1', 'type2', 'type3'])
+sensor3 = pd.DataFrame(np.array(y_new3).T, columns = ['normal', 'type1', 'type2', 'type3'])
+sensor4 = pd.DataFrame(np.array(y_new4).T, columns = ['normal', 'type1', 'type2', 'type3'])
+
+#센서종류단위로 정상,이상 단위로 합친다.
+#센서1,센서2, 센서3,센서4 의 각각 정상,이상 컬럼데이터들을  -> 정상데이터(센서1,센서2,센서3,센서4), 이상/type1(센서1,센서2,~),이상/ty(센서1,센서2~)
+normal_ = pd.concat([sensor1['normal'],sensor2['normal'],sensor3['normal'],sensor4['normal']],axis=1)
+type1_  = pd.concat([sensor1['type1'], sensor2['type1'], sensor3['type1'], sensor4['type1']], axis=1)
+type2_  = pd.concat([sensor1['type2'], sensor2['type2'], sensor3['type2'], sensor4['type2']], axis=1)
+type3_  = pd.concat([sensor1['type3'], sensor2['type3'], sensor3['type3'], sensor4['type3']], axis=1)
+
+#데이터프레임 컬럼에 센서종류 이름 부여
+normal_.columns = ['s1', 's2', 's3', 's4']; type1_.columns = ['s1', 's2', 's3', 's4']
+type2_.columns  = ['s1', 's2', 's3', 's4']; type3_.columns = ['s1', 's2', 's3', 's4']
+
+
+########################################
+#3. RAW 데이터 전처리 : 다시 분리해서 슬라이딩 평균구한다.
+########################################
+"""
+이 코드는 원시 데이터를 전처리하는 과정입니다. 주요 목적은 각 센서의 데이터를 슬라이딩 윈도우 기법을 사용하여 평균값으로 변환하는 것입니다. 이를 통해 노이즈를 줄이고 데이터의 특성을 유지할 수 있습니다. 코드는 다음과 같이 작동합니다:
+M = 15: 슬라이딩 윈도우의 크기를 15로 설정합니다.
+np.convolve 함수를 사용하여 각 센서 데이터의 연속된 15개 값에 대한 평균을 계산합니다. 이때, 윈도우 크기인 M개의 1로 구성된 배열을 사용하여 연산을 수행합니다.
+'valid' 모드를 사용하여 윈도우가 완전히 겹치는 부분만 계산합니다. 이렇게 하면 결과 배열의 크기가 입력 배열보다 작아집니다.
+/ M을 통해 각 연산 결과에 대한 평균값을 계산합니다.
+reshape 함수를 사용하여 결과 배열의 차원을 변경합니다. 이렇게 하면 각 센서 데이터의 행렬 형태가 일치하게 됩니다.
+코드의 결과로 각 센서의 데이터가 15개의 연속된 값에 대한 평균값으로 변환되며, 이를 사용하여 모델을 학습하거나 분석할 수 있습니다. 이러한 전처리 과정은 데이터의 특성을 유지하면서 노이즈를 줄이는 데 도움이 됩니다.
+"""
+#15개 단위로 슬라이딩하여 평균값으로 취함.
+M = 15
+normal_s1 = np.convolve(normal_['s1'], np.ones(M), 'valid') / M; normal_s1 = normal_s1.reshape(len(normal_s1),1)
+normal_s2 = np.convolve(normal_['s2'], np.ones(M), 'valid') / M; normal_s2 = normal_s2.reshape(len(normal_s2),1)
+normal_s3 = np.convolve(normal_['s3'], np.ones(M), 'valid') / M; normal_s3 = normal_s3.reshape(len(normal_s3),1)
+normal_s4 = np.convolve(normal_['s4'], np.ones(M), 'valid') / M; normal_s4 = normal_s4.reshape(len(normal_s4),1)
+
+type1_s1 = np.convolve(type1_['s1'], np.ones(M), 'valid') / M; type1_s1 = type1_s1.reshape(len(type1_s1),1)
+type1_s2 = np.convolve(type1_['s2'], np.ones(M), 'valid') / M; type1_s2 = type1_s2.reshape(len(type1_s2),1)
+type1_s3 = np.convolve(type1_['s3'], np.ones(M), 'valid') / M; type1_s3 = type1_s3.reshape(len(type1_s3),1)
+type1_s4 = np.convolve(type1_['s4'], np.ones(M), 'valid') / M; type1_s4 = type1_s4.reshape(len(type1_s4),1)
+
+type2_s1 = np.convolve(type2_['s1'], np.ones(M), 'valid') / M; type2_s1 = type2_s1.reshape(len(type2_s1),1)
+type2_s2 = np.convolve(type2_['s2'], np.ones(M), 'valid') / M; type2_s2 = type2_s2.reshape(len(type2_s2),1)
+type2_s3 = np.convolve(type2_['s3'], np.ones(M), 'valid') / M; type2_s3 = type2_s3.reshape(len(type2_s3),1)
+type2_s4 = np.convolve(type2_['s4'], np.ones(M), 'valid') / M; type2_s4 = type2_s4.reshape(len(type2_s4),1)
+
+type3_s1 = np.convolve(type3_['s1'], np.ones(M), 'valid') / M; type3_s1 = type3_s1.reshape(len(type3_s1),1)
+type3_s2 = np.convolve(type3_['s2'], np.ones(M), 'valid') / M; type3_s2 = type3_s2.reshape(len(type3_s2),1)
+type3_s3 = np.convolve(type3_['s3'], np.ones(M), 'valid') / M; type3_s3 = type3_s3.reshape(len(type3_s3),1)
+type3_s4 = np.convolve(type3_['s4'], np.ones(M), 'valid') / M; type3_s4 = type3_s4.reshape(len(type3_s4),1)
+
+
+
+########################################
+#4. RAW 데이터 전처리 : 다시 병합해서 1만개씩만 남긴다
+########################################
+"""
+이 코드는 다음 단계를 수행하여 전처리된 센서 데이터를 병합하고 스케일을 조정한 후, 일부 데이터를 선택하는 과정입니다:
+
+np.concatenate 함수를 사용하여 각 상태별로 전처리된 센서 데이터를 수평 방향(axis=1)으로 병합합니다. 이렇게 하면 각 상태의 데이터가 하나의 배열로 합쳐집니다.
+MinMaxScaler()를 사용하여 각 데이터의 스케일을 조정합니다. 이렇게 하면 데이터 값이 0과 1 사이의 범위로 변환되며, 모델 학습에 더 적합한 형태가 됩니다. 먼저, 스케일러를 normal_ 데이터에 맞추고 (scaler.fit(normal_)), 이를 이용해 normal_temp, type1_temp, type2_temp, type3_temp 데이터를 변환합니다.
+슬라이싱을 사용하여 각 데이터셋에서 30,000번째부터 130,000번째까지의 데이터를 선택합니다. 총 100,000개의 데이터가 선택됩니다. 이렇게 하면 데이터의 일부만 사용하게 되며, 이는 모델 학습 시간을 줄이거나 메모리 사용량을 줄이는 데 도움이 됩니다.
+print 함수를 사용하여 각 상태별 데이터의 크기를 출력합니다. 이를 통해 데이터가 올바르게 처리되었는지 확인할 수 있습니다.
+코드의 결과로 전처리된 센서 데이터가 병합되고 스케일이 조정된 후, 선택된 일부 데이터를 사용하여 모델을 학습하거나 분석할 수 있습니다. 이렇게 데이터를 처리하는 것은 머신러닝 알고리즘이나 딥러닝 모델에 적합한 형태로 데이터를 준비하는 데 도움이 됩니다.
+"""
+#다시 병합
+normal_temp = np.concatenate((normal_s1,normal_s2,normal_s3,normal_s4), axis = 1)
+type1_temp = np.concatenate((type1_s1,type1_s2,type1_s3,type1_s4), axis = 1)
+type2_temp = np.concatenate((type2_s1,type2_s2,type2_s3,type2_s4), axis = 1)
+type3_temp = np.concatenate((type3_s1,type3_s2,type3_s3,type3_s4), axis = 1)
+
+#데이터 스케일 변경 0.0~1.0 사이값으로
+scaler = MinMaxScaler()
+scaler.fit(normal_)
+normal = scaler.transform(normal_temp)
+type1  = scaler.transform(type1_temp)
+type2  = scaler.transform(type2_temp)
+type3  = scaler.transform(type3_temp)
+
+#리스트데이터값중 100000개씩만 취득
+normal = normal[30000:130000][:]
+type1  = type1[30000:130000][:]
+type2  = type2[30000:130000][:]
+type3  = type3[30000:130000][:]
+print('normal 상태 데이터의 사이즈', normal.shape)
+print('type1  상태 데이터의 사이즈', type1.shape)
+print('type2  상태 데이터의 사이즈', type2.shape)
+print('type3  상태 데이터의 사이즈', type3.shape)
+
+
+
+########################################
+#5. 학습데이터 생성
+#   - 라벨 값 입력
+########################################
+#데이터프레임으로 변경
+df_normal = pd.DataFrame(normal)
+df_type1 = pd.DataFrame(type1)
+df_type2 = pd.DataFrame(type2)
+df_type3 = pd.DataFrame(type3)
+#데이터에 라벨을 추가
+#AutoEncoder 매트릭스 평가를 위해 추가
+df_normal.loc[:,'label'] = ['NORMAL' for v in range(len(df_normal))]
+df_type1.loc[:,'label'] = ['ANORMAL' for v in range(len(df_type1))]
+df_type2.loc[:,'label'] = ['ANORMAL' for v in range(len(df_type2))]
+df_type3.loc[:,'label'] = ['ANORMAL' for v in range(len(df_type3))]
+print("df_normal :",df_normal.head)
+
+
+
+
+########################################
+#6. 학습데이터 생성
+#   - 학습용 데이터(normal + type1)
+#df_train을 2만개로 결합
+########################################
+"""
+이 코드는 학습 데이터를 생성하는 과정입니다. 주요 목적은 정상(normal) 데이터와 type1 데이터를 합쳐서 학습 데이터를 만들고, 이를 pandas DataFrame 형태로 가공하는 것입니다. 코드는 다음과 같이 작동합니다:
+np.concatenate 함수를 사용하여 정상(normal) 데이터와 type1 데이터를 수직 방향(axis=0)으로 병합합니다. 이렇게 하면 학습 데이터가 하나의 배열로 합쳐집니다.
+병합된 학습 데이터를 pandas DataFrame으로 변환하고, 열 이름을 지정합니다: 'sensor_1', 'sensor_2', 'sensor_3', 'sensor_4', 'label'.
+각 센서 데이터 열의 데이터 타입을 문자열에서 부동 소수점(float)으로 변환합니다. 이렇게 하면 센서 데이터를 수치적으로 처리할 수 있습니다.
+df_train을 df라는 새로운 변수에 할당하고, 중복된 행을 제거합니다(df.drop_duplicates()).
+fillna 함수를 사용하여 결측값을 이전 행의 값으로 채웁니다. 이렇게 하면 데이터에 결측값이 없어지며, 모델 학습에 더 적합한 형태가 됩니다.
+마지막으로 start_date_str 변수에 시작 날짜를 문자열로 저장하고, datetime.strptime 함수를 사용하여 이를 datetime 객체로 변환합니다. 이렇게 하면 날짜 관련 작업을 수행할 수 있습니다.
+이 코드를 통해 생성된 학습 데이터는 머신러닝 알고리즘이나 딥러닝 모델에 입력으로 사용될 수 있습니다. 데이터를 DataFrame 형태로 가공하고 결측값을 처리함으로써, 모델 학습에 더 적합한 형태로 데이터를 준비하는 데 도움이 됩니다.
+"""
+train = np.concatenate((df_normal.values.tolist(),df_type1.values.tolist()))
+#학습용 데이터셋에 대한 컬럼 라벨 설정
+df_train = pd.DataFrame(train, columns=['sensor_1', 'sensor_2', 'sensor_3', 'sensor_4', 'label'])
+#학습용 데이터셋 항목 String -> float 형으로 변환
+df_train['sensor_1'] = df_train['sensor_1'].astype(float)
+df_train['sensor_2'] = df_train['sensor_2'].astype(float)
+df_train['sensor_3'] = df_train['sensor_3'].astype(float)
+df_train['sensor_4'] = df_train['sensor_4'].astype(float)
+df = df_train
+df = df.drop_duplicates()
+df.fillna(method='ffill')
+start_date_str = "2023-01-01 00:00:00"
+start_date = datetime.strptime(start_date_str,'%Y-%m-%d %H:%M:%S')
+
+
+
+
+########################################
+#7. 학습데이터 생성
+"""
+이 코드는 학습 데이터를 생성하고, 정상 데이터와 비정상 데이터를 분리하는 과정입니다. 이렇게 분리된 데이터는 나중에 모델 학습과 테스트에 사용됩니다. 코드는 다음과 같이 작동합니다:
+df 데이터프레임에 'date' 열을 추가합니다. 이 열은 특정 시작 시간부터 분 단위로 증가하는 시간 값을 저장합니다. 이렇게 함으로써 데이터를 시간에 따라 정렬할 수 있습니다.
+'label' 열에 따라 normal_df와 anormal_df로 데이터를 구분합니다. 정상 데이터는 'NORMAL' 라벨을 가지며, 비정상 데이터는 'ANORMAL' 라벨을 가집니다.
+전체 데이터를 10등분하여, 정상 데이터의 앞 7등분을 normal_df1에, 나머지 3등분을 각각 normal_df2, normal_df3, normal_df4에 저장합니다.
+비정상 데이터도 10등분하여, 앞 3등분을 각각 anormal_df1, anormal_df2, anormal_df3에 저장합니다. 주석 처리된 코드는 이전 버전의 코드로 보입니다. 이 코드를 사용하면 비정상 데이터의 7~9등분을 각각 anormal_df1, anormal_df2, anormal_df3에 저장합니다.
+normal_df1의 평균(mean_df)과 표준편차(std_df)를 계산합니다. 이 값들은 나중에 데이터의 정규화 또는 표준화에 사용될 수 있습니다.
+이 코드를 통해 정상 데이터와 비정상 데이터를 분리하고, 이들을 학습 및 테스트 데이터로 사용할 수 있는 여러 하위 데이터셋으로 분할했습니다. 또한 시간 정보를 포함하여 데이터를 시간에 따라 정렬할 수 있게 했습니다. 이렇게 하면 시계열 분석이 가능해지며, 향후 모델 성능 평가에 도움이 됩니다.
+"""
+##########################################
+##1~20000 인덱스 데이터를 특정시간부터 분단위 증가형태로 변형시킴
+## auto-encoder window size 와 같은 형태의 데이터 구성을 맞추기 위함. 꼭 이렇게 해야할 이유는 없지만 형태를 맞춤
+df.loc[:,'date'] = [start_date + timedelta(minutes=v) for v in range(len(df))]
+
+#정상 데이터와 비정상 데이터를 구분시킴
+normal_df = df[df['label']=='NORMAL']
+anormal_df = df[df['label']=='ANORMAL']
+
+##전체 10등분으로 7등분은 train test set으로 구성
+interval_n = int(len(normal_df)/10)
+normal_df1 = df.iloc[0:interval_n*7]
+normal_df2 = df.iloc[interval_n*7:interval_n*8]
+normal_df3 = df.iloc[interval_n*8:interval_n*9]
+normal_df4 = df.iloc[interval_n*9:]
+
+interval_n = int(len(anormal_df)/10)
+anormal_df1 = df.iloc[interval_n*10:interval_n*11]
+anormal_df2 = df.iloc[interval_n*11:interval_n*12]
+anormal_df3 = df.iloc[interval_n*12:interval_n*13]
+
+#interval_n = int(len(anormal_df)/10)
+#anormal_df1 = df.iloc[interval_n*7:interval_n*8]
+#anormal_df2 = df.iloc[interval_n*8:interval_n*9]
+#anormal_df3 = df.iloc[interval_n*9:]
+mean_df = normal_df1.mean()
+std_df = normal_df1.std()
+
+
+
+########################################
+#8. 데이터 분포도
+"""
+이 코드는 데이터의 분포와 상관 관계를 시각화하는데 사용됩니다. 이를 통해 데이터 간의 패턴이나 관계를 이해하고, 모델링 전에 데이터를 미리 살펴볼 수 있습니다.
+
+첫 번째 그래프는 정상 데이터(normal_['s1'])와 비정상 데이터(type1_['s1'])의 첫 300개 데이터 포인트를 표시합니다. 두 클래스 간의 분포 차이를 살펴볼 수 있습니다. 이 그래프는 센서 1의 정상 데이터와 비정상 데이터의 분포를 비교하는데 도움이 됩니다.
+두 번째 그래프는 상관계수 행렬을 표현한 히트맵입니다. 여기서 상관계수는 정상 데이터(normal_)의 센서별 상관 관계를 나타냅니다. 센서 간의 선형 관계를 살펴볼 수 있습니다. 이 정보는 특성 선택이나 차원 축소 과정에서 도움이 될 수 있습니다.
+주석에서 언급한 대로, 센서별로 데이터를 에니메이션으로 표현하는 부분은 이 코드에서는 제공되지 않습니다. 그러나 이러한 시각화는 데이터의 동적 변화를 이해하는데 도움이 될 수 있습니다. 이 코드에서는 'sample.gif' 파일을 생성하여 이러한 에니메이션을 저장할 수 있다고 언급되어 있습니다.
+이 코드의 목적은 데이터를 시각화하여 데이터의 분포와 상관 관계를 이해하고, 이를 바탕으로 데이터 전처리 및 모델링 전략을 수립하는 것입니다. 이러한 시각화는 데이터 과학 프로젝트에서 중요한 단계로, 데이터를 더 깊이 이해할 수 있게 해줍니다."""
+########################################
+# python 버전 : 3.7.3 (버전에 따라, jupyter notebook에서 아래 코드가 실행되지 않을 수 있습니다)
+# 실행이 되지 않는 경우, 아래 코드는 주석처리하고 넘어가도 학습에 영향을 주지 않습니다 (데이터 확인용)
+
+plt.figure(figsize = (10, 4))
+plt.scatter(range(0,300), normal_['s1'][:300], label="class = " + str(1), marker='o', s=5)
+plt.scatter(range(0,300), type1_['s1'][:300], label="class = " + str(2), marker='o', s=5)
+    
+plt.legend(loc="lower right")
+plt.xlabel("Sensor", fontsize=15)
+plt.ylabel("Sensor Value", fontsize=15)
+plt.show()
+plt.close()
+
+names = ['s1','s2','s3','s4']
+cm = np.corrcoef(normal_[names].values.T)
+sns.set(font_scale=0.8)
+sns.heatmap(cm, annot=True, square=True, fmt='.2f', annot_kws={'size': 10}, yticklabels=names, xticklabels=names, cmap=plt.cm.Blues)
+#센서별로 데이터에 대한 그래프를 에니메이션으로 표현한다. 
+#파일은 sample.gif로 존재
+
+
+########################################
+#9. 데이터 분포도
+########################################
+def plot_sensor(temp_df, save_path='sample.gif'):
+
+    fig = plt.figure(figsize=(16, 6))     ##가로 16인치 세로 6인치로 그래프 크기 설정
+
+    camera = Camera(fig)    ## 에니메이션 만들기
+    ax=fig.add_subplot(111)
+    
+    labels = temp_df['label'].values.tolist()    ## 불량 구간 탐색 데이터
+    
+    dates = temp_df.index    ## 그리기 데이터 프레임의 row index를 dates 형태로 인식하기 위해ㅁ
+    ## sensor1~4 4개 이미지를  GIF로 표현
+    ## 센서별로 교차로 정상비정상 영역을 표시함
+    ## index 0~10000 blue(정상), 10000~20000 orange(비정상)
+    for var_name in tqdm([item for item in temp_df.columns if 'sensor_' in item]):
+        print("var_name :",var_name)
+        ## 센서별로 사진 찍기
+        temp_df[var_name].plot(ax=ax,color='darkmagenta')
+        ax.legend([var_name], loc='upper right')
+        
+        ## 고장구간 표시
+        temp_start = dates[0]
+        temp_date = dates[0]
+        temp_label = labels[0]
+        
+        for xc, value in zip(dates, labels):
+            if temp_label != value:
+                #print("xc : ",xc,",value :",value,", temp_label :",temp_label)
+                if temp_label == "NORMAL":
+                    ax.axvspan(temp_start, temp_date, alpha=0.2, color='blue')
+                if temp_label == "ANORMAL":
+                    ax.axvspan(temp_start, temp_date, alpha=0.2, color='orange')
+                temp_start=xc
+                temp_label=value
+            temp_date = xc
+        if temp_label == "NORMAL":
+            ax.axvspan(temp_start, xc, alpha=0.2, color='blue')
+        if temp_label == "ANORMAL":
+            ax.axvspan(temp_start, xc, alpha=0.2, color='orange')
+        ## 카메라 찍기
+        camera.snap()
+        
+    animation = camera.animate(500, blit=True)
+    # .gif 파일로 저장하면 끝!
+    animation.save(
+        save_path,
+        dpi=100,
+        savefig_kwargs={
+            'frameon': False,
+            'pad_inches': 'tight'
+        }
+    )
+
+
+plot_sensor(df_train)
+
+
+########################################
+#10. 모델 생성을 위한 함수및 클래스 정의
+########################################
+args = easydict.EasyDict({
+    "batch_size": 128, ## 배치 사이즈 설정
+    "device": torch.device('cuda') if torch.cuda.is_available() else torch.device('gpu'), ## GPU 사용 여부 설정
+    "input_size": 4, ## 입력 차원 설정
+    "latent_size": 20, ## Hidden 차원 설정
+    "output_size": 4, ## 출력 차원 설정
+    "window_size" : 3, ## sequence Lenght
+    "num_layers": 2,     ## LSTM layer 갯수 설정
+    "learning_rate" : 1e-6, ## learning rate 설정
+    "max_iter" : 100000, ## 총 반복 횟수 설정
+    'early_stop' : True,  ## valid loss가 작아지지 않으면 early stop 조건 설정
+})
+
+
+
+########################################
+#11 학습데이터 개수를 window size 개수만큼 묶음으로 처리하여 리스트로 넘김
+"""
+이 코드는 학습 데이터를 처리하여 일정한 크기의 윈도우로 묶어 리스트로 반환하는 함수 make_data_idx를 정의합니다. 이 함수는 주어진 날짜(dates)와 윈도우 크기(window_size)를 사용하여 인덱스를 묶습니다. 이때 각 인덱스는 1분 간격으로 떨어져 있는지 확인하고 이에 맞추어 묶어줍니다.
+"""
+########################################
+def make_data_idx(dates, window_size=1):
+    input_idx = []     ##input_idx라는 빈 리스트를 선언합니다.
+    for idx in range(window_size-1, len(dates)):      ##dates의 길이에 대해 window_size-1부터 반복합니다.
+        cur_date = dates[idx].to_pydatetime()         ##현재 인덱스에 해당하는 날짜(cur_date)와 이전 인덱스에 해당하는 날짜(in_date)를 계산합니다.
+        in_date = dates[idx - (window_size-1)].to_pydatetime()
+        
+        _in_period = (cur_date - in_date).days * 24 * 60 + (cur_date - in_date).seconds / 60  ##_in_period를 계산하여 현재 인덱스와 이전 인덱스의 날짜 간격이 1분인지 확인합니다.
+        
+        if _in_period == (window_size-1):    ## 각 index가 1분 간격으로 떨어져 있는지를 확인합니다.
+            input_idx.append(list(range(idx - window_size+1, idx+1)))     ##날짜 간격이 1분인 경우, 해당 범위의 인덱스를 input_idx 리스트에 추가합니다.
+    return input_idx          ##모든 인덱스를 검토한 후, input_idx 리스트를 반환합니다.
+
+
+
+########################################
+#12torch DataLoader에 넣어줄 DataSet클래스를 구성한다.
+#DataSet클래스는 __len__, __getitem__을 구현해야함 
+"""
+이 코드는 PyTorch의 Dataset 클래스를 상속받아 사용자 정의 Dataset 클래스인 TagDataset을 구현합니다. 이 클래스는 학습 데이터를 처리하고, 데이터를 로드하는 데 필요한 기능을 제공합니다. 사용자 정의 Dataset 클래스는 반드시 __len__과 __getitem__ 메서드를 구현해야 합니다.
+TagDataset 클래스는 다음과 같은 메서드와 속성을 가집니다:
+__init__: 클래스를 초기화합니다. 이 메서드는 다음 인자를 받습니다.
+input_size: 입력 변수의 개수입니다.
+df: 학습 데이터를 포함하는 DataFrame입니다.
+mean_df (선택적): 평균을 계산할 DataFrame입니다. 기본값은 None입니다.
+std_df (선택적): 표준편차를 계산할 DataFrame입니다. 기본값은 None입니다.
+window_size (선택적): 시퀀스 길이입니다. 기본값은 1입니다.
+이 메서드는 데이터를 정규화하고, 연속한 인덱스를 기준으로 학습 데이터를 구성합니다. 또한, 정규화된 데이터와 원본 데이터를 저장합니다.
+__len__: Dataset의 길이를 반환합니다. 이 메서드는 데이터 샘플의 개수를 반환합니다.
+__getitem__: 주어진 인덱스에 해당하는 데이터 샘플을 반환합니다. 이 메서드는 입력 데이터를 처리하고, 입력 데이터를 반환하는 역할을 합니다.
+"""
+########################################
+class TagDataset(Dataset):
+    def __init__(self, input_size, df, mean_df=None, std_df = None, window_size=1):
+       
+        self.input_size = input_size     ## 변수 갯수
+        
+        self.window_size = window_size   ## 복원할 sequence 길이
+        
+        original_df = df.copy()          ## Summary용 데이터 Deep copy
+        
+        if mean_df is not None and std_df is not None:         ## 정규화한다. 정규화로 데이터의 간격의 크기는 달라질수 있어도 간격의 의미는 달라지지 않는다.
+            sensor_columns = [item for item in df.columns if 'sensor_' in item]
+            df[sensor_columns] = (df[sensor_columns]-mean_df)/std_df         ## 정규화 Zscore = (data-mean) / std
+        
+        dates = list(df['date'])         ## 연속한 index를 기준으로 학습에 사용합니다.
+        self.input_ids = make_data_idx(dates, window_size=window_size)
+        # print("input_ids:",self.input_ids)
+        ## sensor 데이터만 사용하여 reconstruct에 활용
+        ## 입력 개수는 sensor1~4 이므로 4개일수밖에없음.
+        self.selected_column = [item for item in df.columns if 'sensor_' in item][:input_size]
+        self.var_data = torch.tensor(df[self.selected_column].values, dtype=torch.float)
+        #print("selfvar_datadf :",self.var_data)
+        ## Summary 용
+        self.df = original_df.iloc[np.array(self.input_ids)[:, -1]]
+        #print("self.df :",self.df)
+        
+    def __len__(self):        ## Dataset은 반드시 __len__ 함수를 만들어줘야함(데이터 길이)
+        return len(self.input_ids)
+    
+#     def __getitem__(self, item):
+#         temp_input_ids = self.input_ids[item]
+#         input_values = self.var_data[temp_input_ids]
+#         return input_values
+
+#     def __getitem__(self, idx):
+#         ...
+#         # Change this line
+#         # return (torch.tensor(self.df.iloc[idx, :-1].values.astype(np.float32)).view(-1, self.input_size),
+#         #         torch.tensor(self.df.iloc[idx, -1].astype(np.float32)))
+
+#         # To this
+#         row = self.df.iloc[idx]
+#         data = torch.tensor(row[:-1].values.astype(np.float32)).view(-1, self.input_size)
+#         label = torch.tensor(row[-1].astype(np.float32))
+#         return data, label
+
+    
+#     def __getitem__(self, idx):
+#         ...
+#     # Change this line
+#     # return (torch.tensor(self.df.iloc[idx, :-1].values.astype(np.float32)).view(-1, self.input_size),
+#     #         torch.tensor(self.df.iloc[idx, -1].astype(np.float32)))
+
+#     # To this
+#         row = self.df.iloc[idx]
+#         data = torch.tensor(row[:-1].values.astype(np.float32)).view(-1, self.input_size)
+#         label = torch.tensor(0 if row[-1] == 'NORMAL' else 1)  # Assuming the label is 'NORMAL' or 'ANOMALY'
+#         return data, label
+
+    
+class TagDataset(Dataset):
+    def __init__(self, df, input_size, window_size, mean_df, std_df):
+        self.df = df
+        self.input_size = input_size
+        self.window_size = window_size
+        self.mean_df = mean_df
+        self.std_df = std_df
+
+    def __len__(self):
+        return len(self.df) - self.window_size + 1
+
+    def __getitem__(self, idx):
+        if torch.is_tensor(idx):
+            idx = idx.tolist()
+
+        window_df = self.df.iloc[idx:idx+self.window_size, :-1]
+        data = torch.tensor(window_df.apply(lambda x: (x - self.mean_df) / self.std_df).values.astype(np.float32)).view(self.window_size, self.input_size)
+
+        label = self.df.iloc[idx + self.window_size - 1, -1]
+        if label == 'NORMAL':
+            label = torch.tensor(0, dtype=torch.long)
+        else:
+            label = torch.tensor(1, dtype=torch.long)
+
+        return data, label
+
+
+
+########################################
+#13LSTM 파라미터 
+'''
+input_size – The number of expected features in the input x (입력 x의 피처 갯수)
+hidden_size – The number of features in the hidden state h, (64)
+num_layers – Number of recurrent layers. E.g., setting num_layers=2 would mean stacking two LSTMs together to form a stacked LSTM, with the second LSTM taking in outputs of the first LSTM and computing the final results. Default: 1 , 본인의 경우 (2)
+bias – If False, then the layer does not use bias weights b_ih and b_hh. Default: True
+batch_first – If True, then the input and output tensors are provided as (batch, seq, feature). Default: False
+dropout – If non-zero, introduces a Dropout layer on the outputs of each LSTM layer except the last layer, with dropout probability equal to dropout. Default: 0
+bidirectional – If True, becomes a bidirectional LSTM. Default: False
+proj_size – If > 0, will use LSTM with projections of corresponding size. Default: 0
+'''
+########################################
+
+# class Encoder(nn.Module):
+#     def __init__(self, input_dim, num_filters, kernel_size):
+#         super(Encoder, self).__init__()
+#         self.conv = nn.Sequential(
+#             nn.Conv1d(input_dim, num_filters, kernel_size, padding=1),
+#             nn.ReLU(),
+#             nn.MaxPool1d(2)
+#         )
+
+#     def forward(self, x):
+#         x = x.permute(0, 2, 1)
+#         return self.conv(x)
+    
+# class Encoder(nn.Module):
+#     def __init__(self, input_dim, num_filters, kernel_size):
+#         super(Encoder, self).__init__()
+#         self.conv = nn.Sequential(
+#             nn.Conv1d(input_dim, num_filters, kernel_size=3, stride=1, padding=1),
+#             nn.ReLU(),
+#             nn.MaxPool1d(2, stride=2)
+#         )
+
+#     def forward(self, x):
+#         return self.conv(x.permute(0, 2, 1))
+
+# class Encoder(nn.Module):
+#     def __init__(self, input_dim, num_filters, kernel_size):
+#         super(Encoder, self).__init__()
+#         self.conv = nn.Sequential(
+#             nn.Conv1d(input_dim, num_filters, kernel_size=3, stride=1, padding=1),
+#             nn.ReLU(),
+#             nn.MaxPool1d(2, stride=1) # 수정된 부분
+#         )
+
+#     def forward(self, x):
+#         return self.conv(x.permute(0, 2, 1))
+
+    
+class Encoder(nn.Module):
+    def __init__(self, input_dim, num_filters, kernel_size):
+        super(Encoder, self).__init__()
+        self.conv = nn.Sequential(
+            nn.Conv1d(input_dim, num_filters, kernel_size=3, stride=1, padding=1),
+            nn.ReLU()
+        )
+
+    def forward(self, x):
+        return self.conv(x.permute(0, 2, 1))
+    
+
+# class Decoder(nn.Module):
+#     def __init__(self, output_dim, num_filters, kernel_size):
+#         super(Decoder, self).__init__()
+#         self.deconv = nn.Sequential(
+#             nn.ConvTranspose1d(num_filters, output_dim, kernel_size, stride=2, padding=1, output_padding=1),
+#             nn.ReLU()
+#         )
+
+#     def forward(self, x):
+#         return self.deconv(x).permute(0, 2, 1)
+
+# class Decoder(nn.Module):
+#     def __init__(self, output_dim, num_filters, kernel_size):
+#         super(Decoder, self).__init__()
+#         self.deconv = nn.Sequential(
+#             nn.ConvTranspose1d(num_filters, output_dim, kernel_size, stride=1, padding=1),
+#             nn.ReLU()
+#         )
+
+#     def forward(self, x):
+#         return self.deconv(x).permute(0, 2, 1)
+    
+# class Decoder(nn.Module):
+#     def __init__(self, output_dim, num_filters, kernel_size):
+#         super(Decoder, self).__init__()
+#         self.deconv = nn.Sequential(
+#             nn.ConvTranspose1d(num_filters, output_dim, kernel_size, stride=1, padding=1, output_padding=1),
+#             nn.ReLU()
+#         )
+
+#     def forward(self, x):
+#         return self.deconv(x).permute(0, 2, 1)
+    
+# class Decoder(nn.Module):
+#     def __init__(self, output_dim, num_filters, kernel_size):
+#         super(Decoder, self).__init__()
+#         self.deconv = nn.Sequential(
+#             nn.ConvTranspose1d(num_filters, output_dim, kernel_size=3, stride=2, padding=1, output_padding=1),
+#             nn.ReLU()
+#         )
+
+#     def forward(self, x):
+#         return self.deconv(x).permute(0, 2, 1)    
+
+class Decoder(nn.Module):
+    def __init__(self, input_dim, num_filters, kernel_size):
+        super(Decoder, self).__init__()
+        self.deconv = nn.Sequential(
+            nn.ConvTranspose1d(num_filters, input_dim, kernel_size=3, stride=1, padding=1, output_padding=0),
+            nn.ReLU()
+        )
+
+    def forward(self, x):
+        return self.deconv(x).permute(0, 2, 1)
+
+
+
+
+# class Conv1DAutoEncoder(nn.Module):
+#     def __init__(self, input_dim, latent_dim, window_size, num_filters=32, kernel_size=3):
+#         super(Conv1DAutoEncoder, self).__init__()
+#         self.encoder = Encoder(input_dim=input_dim, num_filters=num_filters, kernel_size=kernel_size)
+#         self.decoder = Decoder(output_dim=input_dim, num_filters=num_filters, kernel_size=kernel_size)
+
+#     def forward(self, x):
+#         # Encoder
+#         latent = self.encoder(x)
+#         # Decoder
+#         outputs = self.decoder(latent)
+#         return outputs
+class Conv1DAutoEncoder(nn.Module):
+    def __init__(self, input_dim, latent_dim, window_size):
+        super(Conv1DAutoEncoder, self).__init__()
+        self.encoder = Encoder(input_dim, latent_dim, kernel_size=3)
+        self.decoder = Decoder(input_dim, latent_dim, kernel_size=3)
+
+    def forward(self, x):
+        x = self.encoder(x)
+        x = self.decoder(x)
+        return x
+
+    def loss_function(self,
+                      *args,
+                      **kwargs) -> dict:
+        recons = args[0]
+        input = args[1]
+        
+        ## MSE loss(Mean squared Error)
+        loss =torch.nn.functional.mse_loss(recons, input)
+        return loss     
+
+
+
+
+########################################
+#14 def run
+########################################
+def run(args, model, train_loader, test_loader):
+    # optimizer 설정
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
+
+    ## 반복 횟수 Setting
+    epochs = tqdm(range(args.max_iter//len(train_loader)+1))
+    
+    ## 학습하기
+    count = 0
+    best_loss = 100000000
+    for epoch in epochs:
+        model.train()
+        optimizer = torch.optim.SGD(model.parameters(), lr=args.learning_rate, momentum=0.9)  # 수정된 부분
+        train_iterator = tqdm(enumerate(train_loader), total=len(train_loader), desc="training")
+
+        for i, batch_data in train_iterator:
+            
+            if count > args.max_iter:
+                return model
+            count += 1
+            
+            batch_data = batch_data.to(args.device)
+            predict_values = model(batch_data)
+            loss = model.loss_function(*predict_values)
+
+            # Backward and optimize
+            loss.backward()
+            optimizer.step()
+            
+            train_iterator.set_postfix({
+                "train_loss": float(loss),
+            })
+        #학숩후 검증하는 단계를 거칠수 있도록 모델 스위칭
+        #evaluation 과정에서 사용하지 않아야 하는 layer들을 알아서 off
+        model.eval()
+        eval_loss = 0
+        test_iterator = tqdm(enumerate(test_loader), total=len(test_loader), desc="testing")
+        with torch.no_grad():
+            for i, batch_data in test_iterator:
+                
+                batch_data = batch_data.to(args.device)
+                predict_values = model(batch_data)
+                ##모델의 loss function은 MSE로 처리
+                loss = model.loss_function(*predict_values)
+
+                eval_loss += loss.mean().item()
+
+                test_iterator.set_postfix({
+                    "eval_loss": float(loss),
+                })
+        eval_loss = eval_loss / len(test_loader)
+        epochs.set_postfix({
+             "Evaluation Score": float(eval_loss),
+        })
+        if eval_loss < best_loss:
+            best_loss = eval_loss
+        else:
+            if args.early_stop:
+                print('early stop condition   best_loss[{}]  eval_loss[{}]'.format(best_loss, eval_loss))
+                return model
+        
+    return model
+
+
+
+
+########################################
+#15 def get_loss_list
+########################################
+# def get_loss_list(args, model, test_loader):
+#     test_iterator = tqdm(enumerate(test_loader), total=len(test_loader), desc="testing")
+#     loss_list = []
+    
+#     with torch.no_grad():
+#         for i, batch_data in test_iterator:
+                
+#             batch_data = batch_data.to(args.device)
+#             predict_values = model(batch_data)
+            
+#             ## MAE(Mean Absolute Error)로 계산, 평균 절대 오차 , reduce=False 손실값 
+#             # predict_values[0] ->예측값, predict_values[1] ->정답 라벨
+#             loss = torch.nn.functional.l1_loss(predict_values[0], predict_values[1], reduce=False)
+#             #loss = loss.sum(dim=2).sum(dim=1).cpu().numpy()
+#             loss = loss.mean(dim=1).cpu().numpy()
+#             loss_list.append(loss)
+#     #print("loss_list 1:",loss_list)
+#     loss_list = np.concatenate(loss_list, axis=0)
+#     #print("loss_list 2:",loss_list)
+#     return loss_list
+
+# def get_loss_list(args, model, dataloader):
+#     model.eval()
+#     loss_list = []
+
+#     with torch.no_grad():
+#         for data in dataloader:
+#             data = data.to(args.device)
+#             recon_batch = model(data)
+            
+#             # 수정된 부분: 입력 텐서와 목표 텐서의 형태를 일치시키기 위해 permute 사용
+#             data = data.permute(0, 2, 1)
+#             loss = F.mse_loss(recon_batch, data, reduction='none').sum(dim=1).detach().cpu().numpy()
+#             loss_list.extend(loss)
+
+#     # 수정된 부분: 반환되는 data와 recon_batch의 형태를 일치시키기 위해 permute 사용
+#     return loss_list, data.permute(0, 2, 1).cpu().numpy(), recon_batch.cpu().numpy()
+
+def get_loss_list(args, model, dataloader):
+    model.eval()
+    loss_list = []
+
+    with torch.no_grad():
+        for data in dataloader:
+            data = data.to(args.device)
+            recon_batch = model(data)
+
+            data = data.permute(0, 2, 1)
+            loss = F.mse_loss(recon_batch, data, reduction='none').sum(dim=1).detach().cpu().numpy()
+            loss_list.extend(loss)
+    return np.array(loss_list), data.permute(0, 2, 1).cpu().numpy(), recon_batch.cpu().numpy()
+
+
+
+
+
+########################################
+#16 모델 생성을 위한 데이터셋 구분
+########################################
+# normal_dataset1 = TagDataset(df=normal_df1, input_size=args.input_size, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
+# normal_dataset2 = TagDataset(df=normal_df2, input_size=args.input_size, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
+# normal_dataset3 = TagDataset(df=normal_df3, input_size=args.input_size, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
+# normal_dataset4 = TagDataset(df=normal_df4, input_size=args.input_size, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
+# anormal_dataset1 = TagDataset(df=anormal_df1, input_size=args.input_size, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
+# anormal_dataset2 = TagDataset(df=anormal_df2, input_size=args.input_size, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
+# anormal_dataset3 = TagDataset(df=anormal_df2, input_size=args.input_size, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
+
+normal_dataset1 = TagDataset(df=normal_df1, input_size=3, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
+normal_dataset2 = TagDataset(df=normal_df2, input_size=3, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
+normal_dataset3 = TagDataset(df=normal_df3, input_size=3, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
+normal_dataset4 = TagDataset(df=normal_df4, input_size=3, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
+anormal_dataset1 = TagDataset(df=anormal_df1, input_size=3, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
+anormal_dataset2 = TagDataset(df=anormal_df2, input_size=3, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
+anormal_dataset3 = TagDataset(df=anormal_df2, input_size=3, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
+
+
+## 학습하기 위해 Dataframe을 DataLoader형태로 변환한다.
+train_loader = torch.utils.data.DataLoader(
+                 dataset=normal_dataset1,
+                 batch_size=args.batch_size,
+                 shuffle=True)
+## 학습->검증하기 위해 Dataframe을 DataLoader형태로 변환한다.
+valid_loader = torch.utils.data.DataLoader(
+                dataset=normal_dataset2,
+                batch_size=args.batch_size,
+                shuffle=False)
+## 생성모델을 테스트하기 위한 변환
+normal_loader3 = torch.utils.data.DataLoader(
+                dataset=normal_dataset3,
+                batch_size=args.batch_size,
+                shuffle=False)
+anormal_loader1 = torch.utils.data.DataLoader(
+                dataset=anormal_dataset1,
+                batch_size=args.batch_size,
+                shuffle=False)
+anormal_loader2 = torch.utils.data.DataLoader(
+                dataset=anormal_dataset2,
+                batch_size=args.batch_size,
+                shuffle=False)
+anormal_loader3 = torch.utils.data.DataLoader(
+                dataset=anormal_dataset3,
+                batch_size=args.batch_size,
+                shuffle=False)
+#AutoEncoder 모델 인스턴스 생성
+model = Conv1DAutoEncoder(input_dim=3,
+                          latent_dim=16, 
+                          window_size=args.window_size)
+
+
+model.to(args.device)
+model = run(args, model, train_loader, valid_loader)
+
+
+
+import matplotlib.pyplot as plt
+
+def visualize_reconstruction(original_data, reconstructed_data, index):
+    plt.figure(figsize=(12, 4))
+    plt.plot(original_data[index], label='Original data')
+    plt.plot(reconstructed_data[index], label='Reconstructed data')
+    plt.legend()
+    plt.show()
+
+# 사용 예시:
+loss_list, original_data, reconstructed_data = get_loss_list(args, model, normal_loader3)
+visualize_reconstruction(original_data, reconstructed_data, 0)
+
+
+
+
+# Check the shape of original data and reconstructed data
+data_iter = iter(normal_loader3)
+data = data_iter.next()
+print("Original data shape:", data.shape)
+
+recon_batch = model(data.to(args.device))
+print("Reconstructed data shape:", recon_batch.shape)
+
+
+
+
+########################################
+#17. 학습모델을 검증데이터셋으로 anormal score 구함
+"""
+이 코드는 학습된 모델을 검증 데이터셋에 적용하여 이상 점수를 계산하는 과정입니다.
+
+get_loss_list 함수를 사용하여 정상 데이터셋(normal_loader3)에 대한 재구성 오차(reconstruction error)를 계산합니다. 이 함수는 모델이 예측한 값과 실제 값의 차이를 평균 절대 오차(MAE)로 계산하여 반환합니다.
+
+재구성 오차의 평균(mean)과 공분산 행렬(std)을 계산합니다.
+
+Anomaly_Calculator 클래스를 정의합니다. 이 클래스는 입력으로 평균(mean)과 공분산 행렬(std)를 받아 초기화하고, 이를 사용하여 주어진 재구성 오차에 대한 이상 점수를 계산합니다. 이상 점수는 Mahalanobis 거리를 사용하여 계산되며, 이는 다변수 데이터의 이상치를 감지하는 데 적합한 방법입니다.
+
+anomaly_calculator 인스턴스를 생성하고 loss_list의 각 재구성 오차에 대해 이상 점수를 계산하여 anomaly_scores 리스트에 추가합니다.
+
+정상 구간에서의 이상 점수 분포를 출력합니다. 평균, 중간값, 최소값, 최대값을 계산하여 출력합니다. 이를 통해 정상 데이터에 대한 모델의 성능을 평가할 수 있습니다.
+
+이 코드는 학습된 모델이 정상 데이터에 대해 얼마나 잘 작동하는지 평가하는 데 도움이 됩니다. 이를 통해 모델의 성능을 확인하고, 필요한 경우 하이퍼파라미터를 조정하여 모델을 개선할 수 있습니다.
+"""
+########################################
+loss_list = get_loss_list(args, model, normal_loader3)
+
+mean = np.mean(loss_list, axis=0)   ## Reconstruction Error의 평균과 Covarinace 계산
+std = np.cov(loss_list.T)
+
+class Anomaly_Calculator:
+    def __init__(self, mean:np.array, std:np.array):     #인스턴스 초기화
+#         assert mean.shape[0] == std.shape[0] and mean.shape[0] == std.shape[1], '평균과 분산의 차원이 똑같아야 합니다.'
+        self.mean = mean
+        self.std_inv = 1 / (std + 1e-8)
+    #인스턴스가 호출되었을때 실행됨
+    def __call__(self, recons_error:np.array):
+        #print("recons_error :",recons_error)
+        #print("mean :",mean)
+        x = (recons_error-self.mean)
+        #print("x :",x)
+        return x * self.std_inv * x
+
+## 비정상 점수 계산기
+anomaly_calculator = Anomaly_Calculator(mean, std)
+anomaly_scores = []
+print(" loss_list len : ", len(loss_list))
+print(" loss_list : ", loss_list[:10])
+for temp_loss in tqdm(loss_list):
+    temp_score = anomaly_calculator(temp_loss)
+    anomaly_scores.append(temp_score)
+
+## 정상구간에서 비정상 점수 분포
+print("평균[{}], 중간[{}], 최소[{}], 최대[{}]".format(np.mean(anomaly_scores), np.median(anomaly_scores), np.min(anomaly_scores), np.max(anomaly_scores)))
+print("평균[{:.10f}], 중간[{:.10f}], 최소[{:.10f}], 최대[{:.10f}]".format(np.mean(anomaly_scores), np.median(anomaly_scores), np.min(anomaly_scores), np.max(anomaly_scores)))
+
+
+# 기존 코드
+mean = np.mean(loss_list, axis=0)
+std = np.cov(loss_list.T)
+
+# 수정 후 코드
+mean = np.mean(loss_list)
+std = np.cov(loss_list)
+
+print("Mean shape:", mean.shape)
+print("Std shape:", std.shape)
+
+
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+%matplotlib inline
+
+plt.plot(anomaly_scores)
+plt.gcf().set_size_inches(15, 5)
+plt.show()
+
+
+########################################
+#9. 학습모델을 anormal데이터셋으로 anormal score 구함
+########################################
+total_loss = get_loss_list(args, model, anormal_loader3)
+print(" total_loss len : ", len(total_loss))
+print(" total_loss : ", total_loss[:10])
+## 이상치 점수 계산하기
+anomaly_scores = []
+for temp_loss in tqdm(total_loss):
+    temp_score = anomaly_calculator(temp_loss)
+    anomaly_scores.append(temp_score)
+
+print("평균[{}], 중간[{}], 최소[{}], 최대[{}]".format(np.mean(anomaly_scores), np.median(anomaly_scores), np.min(anomaly_scores), np.max(anomaly_scores)))
+print("평균[{:.10f}], 중간[{:.10f}], 최소[{:.10f}], 최대[{:.10f}]".format(np.mean(anomaly_scores), np.median(anomaly_scores), np.min(anomaly_scores), np.max(anomaly_scores)))
+visualization_df = anormal_dataset1.df
+visualization_df['score'] = anomaly_scores
+visualization_df['recons_error'] = total_loss.sum(axis=1)
+
+
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+%matplotlib inline
+
+plt.plot(anomaly_scores)
+plt.legend(['Anomaly Score'])
+plt.gcf().set_size_inches(15, 5)
+plt.show()
+
+
+########################################
+#10. 학습모델저장 및 복원
+########################################
+torch.save(model.state_dict(), './anormaly_model')
+model.load_state_dict(torch.load('./anormaly_model'))
+model.eval()
