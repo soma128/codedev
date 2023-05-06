@@ -447,17 +447,15 @@ class TagDataset(Dataset):
         if input_columns is not None and output_column is not None:
             self.df = self.df[[*input_columns, output_column]]
         self.input_size = self.df.shape[1] - 1
-
+​
     def __len__(self):
         return len(self.df) - self.window_size + 1
-
+​
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
         data = torch.tensor(row[:-1].values.astype(np.float32)).view(-1, self.input_size)
         label = torch.tensor(row[-1].astype(np.float32))
         return data, label
-
-
 
 ########################################
 #13LSTM 파라미터 
@@ -748,21 +746,16 @@ def get_loss_list(args, model, dataloader):
 ########################################
 #16 모델 생성을 위한 데이터셋 구분
 ########################################
-# normal_dataset1 = TagDataset(df=normal_df1, input_size=args.input_size, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
-# normal_dataset2 = TagDataset(df=normal_df2, input_size=args.input_size, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
-# normal_dataset3 = TagDataset(df=normal_df3, input_size=args.input_size, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
-# normal_dataset4 = TagDataset(df=normal_df4, input_size=args.input_size, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
-# anormal_dataset1 = TagDataset(df=anormal_df1, input_size=args.input_size, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
-# anormal_dataset2 = TagDataset(df=anormal_df2, input_size=args.input_size, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
-# anormal_dataset3 = TagDataset(df=anormal_df2, input_size=args.input_size, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
+input_columns = ['tag1', 'tag2', 'tag3']
+output_column = 'status'
 
-normal_dataset1 = TagDataset(df=normal_df1, input_size=3, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
-normal_dataset2 = TagDataset(df=normal_df2, input_size=3, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
-normal_dataset3 = TagDataset(df=normal_df3, input_size=3, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
-normal_dataset4 = TagDataset(df=normal_df4, input_size=3, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
-anormal_dataset1 = TagDataset(df=anormal_df1, input_size=3, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
-anormal_dataset2 = TagDataset(df=anormal_df2, input_size=3, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
-anormal_dataset3 = TagDataset(df=anormal_df2, input_size=3, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
+normal_dataset1 = TagDataset(normal_df1, input_columns=input_columns, output_column=output_column, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
+normal_dataset2 = TagDataset(normal_df2, input_columns=input_columns, output_column=output_column, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
+normal_dataset3 = TagDataset(normal_df3, input_columns=input_columns, output_column=output_column, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
+normal_dataset4 = TagDataset(normal_df4, input_columns=input_columns, output_column=output_column, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
+anormal_dataset1 = TagDataset(anormal_df1, input_columns=input_columns, output_column=output_column, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
+anormal_dataset2 = TagDataset(anormal_df2, input_columns=input_columns, output_column=output_column, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
+anormal_dataset3 = TagDataset(anormal_df2, input_columns=input_columns, output_column=output_column, window_size=args.window_size, mean_df=mean_df, std_df=std_df)
 
 
 ## 학습하기 위해 Dataframe을 DataLoader형태로 변환한다.
@@ -792,14 +785,15 @@ anormal_loader3 = torch.utils.data.DataLoader(
                 dataset=anormal_dataset3,
                 batch_size=args.batch_size,
                 shuffle=False)
+
 #AutoEncoder 모델 인스턴스 생성
-model = Conv1DAutoEncoder(input_dim=3,
-                          latent_dim=16, 
-                          window_size=args.window_size)
-
-
+model = LSTMAutoEncoder(input_dim=args.input_size, 
+                        latent_dim=args.latent_size, 
+                        window_size=args.window_size, 
+                        num_layers=args.num_layers)
 model.to(args.device)
 model = run(args, model, train_loader, valid_loader)
+#model = run(args, model, train_loader, anormal_loader3)
 
 
 
