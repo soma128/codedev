@@ -456,7 +456,7 @@ class TagDataset(Dataset):
             idx = idx.tolist()
 
         window_df = self.df.iloc[idx:idx+self.window_size, :-1]
-        data = torch.tensor(window_df.apply(lambda x: (x - self.mean_df) / self.std_df).values.astype(np.float32)).view(self.window_size, self.input_size)
+        data = torch.tensor(window_df.apply(lambda x: (x - self.mean_df) / self.std_df).values.astype(np.float32)).view(self.window_size, -1)
 
         label = self.df.iloc[idx + self.window_size - 1, -1]
         if label == 'NORMAL':
