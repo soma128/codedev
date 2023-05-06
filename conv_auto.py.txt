@@ -381,33 +381,33 @@ __len__: Dataset의 길이를 반환합니다. 이 메서드는 데이터 샘플
 __getitem__: 주어진 인덱스에 해당하는 데이터 샘플을 반환합니다. 이 메서드는 입력 데이터를 처리하고, 입력 데이터를 반환하는 역할을 합니다.
 """
 ########################################
-class TagDataset(Dataset):
-    def __init__(self, input_size, df, mean_df=None, std_df = None, window_size=1):
+# class TagDataset(Dataset):
+#     def __init__(self, input_size, df, mean_df=None, std_df = None, window_size=1):
        
-        self.input_size = input_size     ## 변수 갯수
+#         self.input_size = input_size     ## 변수 갯수
         
-        self.window_size = window_size   ## 복원할 sequence 길이
+#         self.window_size = window_size   ## 복원할 sequence 길이
         
-        original_df = df.copy()          ## Summary용 데이터 Deep copy
+#         original_df = df.copy()          ## Summary용 데이터 Deep copy
         
-        if mean_df is not None and std_df is not None:         ## 정규화한다. 정규화로 데이터의 간격의 크기는 달라질수 있어도 간격의 의미는 달라지지 않는다.
-            sensor_columns = [item for item in df.columns if 'sensor_' in item]
-            df[sensor_columns] = (df[sensor_columns]-mean_df)/std_df         ## 정규화 Zscore = (data-mean) / std
+#         if mean_df is not None and std_df is not None:         ## 정규화한다. 정규화로 데이터의 간격의 크기는 달라질수 있어도 간격의 의미는 달라지지 않는다.
+#             sensor_columns = [item for item in df.columns if 'sensor_' in item]
+#             df[sensor_columns] = (df[sensor_columns]-mean_df)/std_df         ## 정규화 Zscore = (data-mean) / std
         
-        dates = list(df['date'])         ## 연속한 index를 기준으로 학습에 사용합니다.
-        self.input_ids = make_data_idx(dates, window_size=window_size)
-        # print("input_ids:",self.input_ids)
-        ## sensor 데이터만 사용하여 reconstruct에 활용
-        ## 입력 개수는 sensor1~4 이므로 4개일수밖에없음.
-        self.selected_column = [item for item in df.columns if 'sensor_' in item][:input_size]
-        self.var_data = torch.tensor(df[self.selected_column].values, dtype=torch.float)
-        #print("selfvar_datadf :",self.var_data)
-        ## Summary 용
-        self.df = original_df.iloc[np.array(self.input_ids)[:, -1]]
-        #print("self.df :",self.df)
+#         dates = list(df['date'])         ## 연속한 index를 기준으로 학습에 사용합니다.
+#         self.input_ids = make_data_idx(dates, window_size=window_size)
+#         # print("input_ids:",self.input_ids)
+#         ## sensor 데이터만 사용하여 reconstruct에 활용
+#         ## 입력 개수는 sensor1~4 이므로 4개일수밖에없음.
+#         self.selected_column = [item for item in df.columns if 'sensor_' in item][:input_size]
+#         self.var_data = torch.tensor(df[self.selected_column].values, dtype=torch.float)
+#         #print("selfvar_datadf :",self.var_data)
+#         ## Summary 용
+#         self.df = original_df.iloc[np.array(self.input_ids)[:, -1]]
+#         #print("self.df :",self.df)
         
-    def __len__(self):        ## Dataset은 반드시 __len__ 함수를 만들어줘야함(데이터 길이)
-        return len(self.input_ids)
+#     def __len__(self):        ## Dataset은 반드시 __len__ 함수를 만들어줘야함(데이터 길이)
+#         return len(self.input_ids)
     
 #     def __getitem__(self, item):
 #         temp_input_ids = self.input_ids[item]
@@ -441,29 +441,20 @@ class TagDataset(Dataset):
 
     
 class TagDataset(Dataset):
-    def __init__(self, df, input_size, window_size, mean_df, std_df):
-        self.df = df
-        self.input_size = input_size
+    def __init__(self, file_path, window_size=128, input_columns=None, output_column=None):
         self.window_size = window_size
-        self.mean_df = mean_df
-        self.std_df = std_df
+        self.df = pd.read_csv(file_path)
+        if input_columns is not None and output_column is not None:
+            self.df = self.df[[*input_columns, output_column]]
+        self.input_size = self.df.shape[1] - 1
 
     def __len__(self):
         return len(self.df) - self.window_size + 1
 
     def __getitem__(self, idx):
-        if torch.is_tensor(idx):
-            idx = idx.tolist()
-
-        window_df = self.df.iloc[idx:idx+self.window_size, :-1]
-        data = torch.tensor(window_df.apply(lambda x: (x - self.mean_df) / self.std_df).values.astype(np.float32)).view(self.window_size, -1)
-
-        label = self.df.iloc[idx + self.window_size - 1, -1]
-        if label == 'NORMAL':
-            label = torch.tensor(0, dtype=torch.long)
-        else:
-            label = torch.tensor(1, dtype=torch.long)
-
+        row = self.df.iloc[idx]
+        data = torch.tensor(row[:-1].values.astype(np.float32)).view(-1, self.input_size)
+        label = torch.tensor(row[-1].astype(np.float32))
         return data, label
 
 
